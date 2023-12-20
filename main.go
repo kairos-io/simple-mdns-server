@@ -15,9 +15,11 @@ import (
 
 func main() {
 	var interfaceName string
+	var serviceType string
 	var port int
 
 	flag.StringVar(&interfaceName, "interfaceName", "", "The network interface to expose")
+	flag.StringVar(&serviceType, "serviceType", "", "The type to advertise over mdns (e.g. \"_kcrypt._tcp\")")
 	flag.IntVar(&port, "port", 0, "The port to expose")
 	flag.Parse()
 
@@ -27,6 +29,11 @@ func main() {
 	}
 	if interfaceName == "" {
 		log.Println("interfaceName should be specified with --interfaceName")
+		os.Exit(1)
+	}
+
+	if serviceType == "" {
+		log.Println("serviceType should be specified with --serviceType")
 		os.Exit(1)
 	}
 
@@ -42,14 +49,14 @@ func main() {
 
 	// Setup our service export
 	host, _ := os.Hostname()
-	info := []string{"Kcrypt challenger server"}
-	service, _ := mdns.NewMDNSService(host, "_kcrypt._tcp", "", "", port, []net.IP{ip}, info)
+	info := []string{"An instance of " + serviceType}
+	service, _ := mdns.NewMDNSService(host, serviceType, "", "", port, []net.IP{ip}, info)
 
 	// Create the mDNS server, defer shutdown
 	server, _ := mdns.NewServer(&mdns.Config{Zone: service})
 	defer server.Shutdown()
 
-	log.Printf("Server created. Advertising %s:%d as %s", ip, port, "_kcrypt._tcp")
+	log.Printf("Server created. Advertising %s:%d as %s", ip, port, serviceType)
 	sitAndWait()
 }
 
