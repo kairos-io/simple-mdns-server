@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/hashicorp/mdns"
@@ -16,8 +17,10 @@ import (
 func main() {
 	var interfaceName string
 	var serviceType string
+	var hostname string
 	var port int
 
+	flag.StringVar(&hostname, "hostName", "", "The hostname that uniquely identifies this instance")
 	flag.StringVar(&interfaceName, "interfaceName", "", "The network interface to expose")
 	flag.StringVar(&serviceType, "serviceType", "", "The type to advertise over mdns (e.g. \"_kcrypt._tcp\")")
 	flag.IntVar(&port, "port", 0, "The port to expose")
@@ -37,6 +40,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	if hostname == "" {
+		log.Println("hostName should be specified with --hostName")
+		os.Exit(1)
+	}
+
+	// Create a valid FQDN from the hostname
+	if !strings.HasSuffix(hostname, ".") {
+		hostname += "."
+	}
+
 	ip, err := findIPAddress(interfaceName)
 	if err != nil {
 		log.Println(err.Error())
@@ -50,13 +63,16 @@ func main() {
 	// Setup our service export
 	host, _ := os.Hostname()
 	info := []string{"An instance of " + serviceType}
-	service, _ := mdns.NewMDNSService(host, serviceType, "", "", port, []net.IP{ip}, info)
+	service, err := mdns.NewMDNSService(host, serviceType, "", hostname, port, []net.IP{ip}, info)
+	if err != nil {
+		panic(err.Error())
+	}
 
 	// Create the mDNS server, defer shutdown
 	server, _ := mdns.NewServer(&mdns.Config{Zone: service})
 	defer server.Shutdown()
 
-	log.Printf("Server created. Advertising %s:%d as %s", ip, port, serviceType)
+	log.Printf("Server created. Advertising %s:%d as %s of type %s", ip, port, hostname, serviceType)
 	sitAndWait()
 }
 
