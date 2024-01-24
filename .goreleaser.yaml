@@ -1,0 +1,31 @@
+# Make sure to check the documentation at http://goreleaser.com
+project_name: simple-mdns-server
+builds:
+  - ldflags:
+      - -w -s -X "github.com/kairos-io/simple-mdns-server/internal/version.version={{.Tag}}" -X "github.com/kairos-io/simple-mdns-server/internal/version.gitCommit={{.ShortCommit}}"
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    binary: '{{ .ProjectName }}'
+source:
+  enabled: true
+  name_template: '{{ .ProjectName }}-{{ .Tag }}-source'
+archives:
+  # Default template uses underscores instead of -
+  - name_template: >-
+      {{ .ProjectName }}-{{ .Tag }}-{{- title .Os }}-{{- if eq .Arch "amd64" }}x86_64{{- else if eq .Arch "386" }}i386{{- else }}{{ .Arch }}{{ end }}{{- if .Arm }}v{{ .Arm }}{{ end }}
+checksum:
+  name_template: '{{ .ProjectName }}-{{ .Tag }}-checksums.txt'
+snapshot:
+  name_template: "{{ .Tag }}-next"
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^Merge pull request'
