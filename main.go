@@ -16,12 +16,16 @@ import (
 
 func main() {
 	var interfaceName string
+	var address string
 	var serviceType string
 	var hostname string
 	var port int
+	var err error
+	var ip net.IP
 
 	flag.StringVar(&hostname, "hostName", "", "The hostname that uniquely identifies this instance")
 	flag.StringVar(&interfaceName, "interfaceName", "", "The network interface to expose")
+	flag.StringVar(&address, "address", "", "The IP address to advertise")
 	flag.StringVar(&serviceType, "serviceType", "", "The type to advertise over mdns (e.g. \"_kcrypt._tcp\")")
 	flag.IntVar(&port, "port", 0, "The port to expose")
 	flag.Parse()
@@ -30,8 +34,8 @@ func main() {
 		log.Println("port should be specified with --port")
 		os.Exit(1)
 	}
-	if interfaceName == "" {
-		log.Println("interfaceName should be specified with --interfaceName")
+	if interfaceName == "" && address == "" {
+		log.Println("interfaceName or address should be specified (--interfaceName|-address)")
 		os.Exit(1)
 	}
 
@@ -50,14 +54,22 @@ func main() {
 		hostname += "."
 	}
 
-	ip, err := findIPAddress(interfaceName)
-	if err != nil {
-		log.Println(err.Error())
-		os.Exit(1)
-	}
-	if ip == nil {
-		log.Printf("Could not find an IP address (v4) for interface %s", interfaceName)
-		os.Exit(1)
+	if address != "" {
+		ip = net.ParseIP(address)
+		if ip == nil {
+			log.Println("invalid IPv4 address specified")
+			os.Exit(1)
+		}
+	} else {
+		ip, err = findIPAddress(interfaceName)
+		if err != nil {
+			log.Println(err.Error())
+			os.Exit(1)
+		}
+		if ip == nil {
+			log.Printf("Could not find an IP address (v4) for interface %s", interfaceName)
+			os.Exit(1)
+		}
 	}
 
 	// Setup our service export
