@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/mdns"
+	"github.com/miekg/dns"
 )
 
 func main() {
@@ -34,6 +35,7 @@ func runServer() {
 	var serviceType string
 	var hostname string
 	var port int
+	var bindToInterface bool
 	var err error
 	var ip net.IP
 
@@ -43,6 +45,7 @@ func runServer() {
 	flagSet.StringVar(&address, "address", "", "The IP address to advertise")
 	flagSet.StringVar(&serviceType, "serviceType", "", "The type to advertise over mdns (e.g. \"_kcrypt._tcp\")")
 	flagSet.IntVar(&port, "port", 0, "The port to expose")
+	flagSet.BoolVar(&bindToInterface, "bindToInterface", true, "Bind to specific interface (set false for VM/bridge scenarios)")
 
 	// Parse flags, handling both cases: with or without subcommand
 	if len(os.Args) > 1 && os.Args[1] != "lookup" && os.Args[1] != "query" {
@@ -58,7 +61,9 @@ func runServer() {
 		os.Exit(1)
 	}
 	if interfaceName == "" && address == "" {
-		log.Println("interfaceName or address should be specified (--interfaceName|-address)")
+		log.Println("interfaceName or address should be specified (--interfaceName or --address)")
+		log.Println("Note: If you want to use system default interface, specify --address with")
+		log.Println("a reachable IP and --bindToInterface=false")
 		os.Exit(1)
 	}
 
@@ -85,14 +90,20 @@ func runServer() {
 			log.Println("invalid IPv4 address specified")
 			os.Exit(1)
 		}
-		// Find the interface that has this IP address to bind multicast to it
-		iface, err = findInterfaceByIP(ip)
-		if err != nil {
-			log.Printf("Warning: Error finding interface for IP %s: %v. Using system default.", ip, err)
-		} else if iface == nil {
-			log.Printf("Warning: Could not find interface for IP %s. Using system default.", ip)
+		if bindToInterface {
+			// Find the interface that has this IP address to bind multicast to it
+			iface, err = findInterfaceByIP(ip)
+			if err != nil {
+				log.Printf("Warning: Error finding interface for IP %s: %v. Using system default.", ip, err)
+				iface = nil
+			} else if iface == nil {
+				log.Printf("Warning: Could not find interface for IP %s. Using system default.", ip)
+			} else {
+				log.Printf("Found interface %s for IP %s", iface.Name, ip)
+			}
 		} else {
-			log.Printf("Found interface %s for IP %s", iface.Name, ip)
+			log.Printf("Using IP %s for advertisement but not binding to specific interface", ip)
+			iface = nil
 		}
 	} else {
 		ip, err = findIPAddress(interfaceName)
@@ -104,12 +115,18 @@ func runServer() {
 			log.Printf("Could not find an IP address (v4) for interface %s", interfaceName)
 			os.Exit(1)
 		}
-		// Get the interface by name to bind multicast to it
-		iface, err = net.InterfaceByName(interfaceName)
-		if err != nil {
-			log.Printf("Warning: Error finding interface %s: %v. Using system default.", interfaceName, err)
+		if bindToInterface {
+			// Get the interface by name to bind multicast to it
+			iface, err = net.InterfaceByName(interfaceName)
+			if err != nil {
+				log.Printf("Warning: Error finding interface %s: %v. Using system default.", interfaceName, err)
+				iface = nil
+			} else {
+				log.Printf("Using interface %s", iface.Name)
+			}
 		} else {
-			log.Printf("Using interface %s", iface.Name)
+			log.Printf("Using IP %s from interface %s but not binding to specific interface", ip, interfaceName)
+			iface = nil
 		}
 	}
 
@@ -124,10 +141,15 @@ func runServer() {
 	instanceName := strings.TrimSuffix(hostname, ".")
 
 	info := []string{"An instance of " + serviceType}
-	service, err := mdns.NewMDNSService(instanceName, serviceType, "", "", port, []net.IP{ip}, info)
+	baseService, err := mdns.NewMDNSService(instanceName, serviceType, "", "", port, []net.IP{ip}, info)
 	if err != nil {
 		log.Printf("Error creating mDNS service: %v", err)
 		os.Exit(1)
+	}
+
+	// Wrap the service with a logging zone to track queries
+	service := &loggingZone{
+		zone: baseService,
 	}
 
 	// Create the mDNS server, defer shutdown
@@ -135,15 +157,31 @@ func runServer() {
 	// NOTE: The hashicorp/mdns library silently ignores errors when binding to multicast.
 	// If binding fails (e.g., port 5353 already in use), the server will be created
 	// but won't actually listen. We enable LogEmptyResponses to help debug.
+	//
+	// IMPORTANT: mDNS Response Behavior
+	// - Queries are typically multicast to 224.0.0.251:5353
+	// - Responses can be either UNICAST (directly to client IP) or MULTICAST (to 224.0.0.251:5353)
+	// - The hashicorp/mdns library follows RFC 6762: responses are typically UNICAST if the
+	//   query came from a unicast address, MULTICAST if from multicast
+	// - UNICAST responses may not route correctly across VM boundaries or network segments
+	// - Binding to a specific interface limits responses to that interface only
+	//
+	// If clients aren't receiving responses:
+	// 1. Try --bindToInterface=false to respond on all interfaces
+	// 2. Use tcpdump/wireshark to verify: "sudo tcpdump -i any port 5353"
+	// 3. Check if responses are unicast (to client IP) vs multicast (224.0.0.251)
 	config := &mdns.Config{
 		Zone:              service,
-		LogEmptyResponses: true, // Enable logging to debug queries
+		LogEmptyResponses: true, // Enable logging to debug queries (logs when no response available)
 	}
 	if iface != nil {
 		config.Iface = iface
-		log.Printf("Binding mDNS server to interface %s", iface.Name)
+		log.Printf("Binding mDNS server to interface %s (IP: %s)", iface.Name, ip)
+		log.Printf("WARNING: Binding to a specific interface may prevent responses from reaching")
+		log.Printf("clients on other network segments (e.g., VMs). If queries aren't working,")
+		log.Printf("try running without --address/--interfaceName to use system default.")
 	} else {
-		log.Printf("Using system default multicast interface")
+		log.Printf("Using system default multicast interface (will respond on all interfaces)")
 	}
 	server, err := mdns.NewServer(config)
 	if err != nil {
@@ -159,6 +197,13 @@ func runServer() {
 	log.Printf("Service will respond to queries for: %s", serviceType+".local.")
 	log.Printf("NOTE: The server only responds to queries - it does not proactively announce.")
 	log.Printf("Make sure clients query for: %s", serviceType+".local.")
+	log.Printf("")
+	log.Printf("DEBUGGING: If clients aren't receiving responses, check:")
+	log.Printf("  - Responses may be UNICAST (to client IP) which may not route across VM boundaries")
+	log.Printf("  - Use: sudo tcpdump -i any port 5353 to see mDNS traffic")
+	log.Printf("  - Try: --bindToInterface=false to respond on all interfaces")
+	log.Printf("  - Check FIREWALL rules on both host AND client (VM) - unicast UDP may be blocked")
+	log.Printf("")
 	sitAndWait()
 }
 
@@ -302,4 +347,30 @@ func findInterfaceByIP(targetIP net.IP) (*net.Interface, error) {
 	}
 
 	return nil, nil
+}
+
+// loggingZone wraps an mdns.Zone to log incoming queries
+// Note: The Zone interface doesn't expose client IP, so we log the query details.
+// To see client IPs, use: sudo tcpdump -i any port 5353
+type loggingZone struct {
+	zone mdns.Zone
+}
+
+func (lz *loggingZone) Records(q dns.Question) []dns.RR {
+	// Log the incoming query
+	log.Printf("Received query: %s (type: %d, class: %d)", q.Name, q.Qtype, q.Qclass)
+
+	// Get records from the underlying zone
+	records := lz.zone.Records(q)
+
+	if len(records) > 0 {
+		log.Printf("  -> Responding with %d record(s) for query: %s", len(records), q.Name)
+		log.Printf("  -> NOTE: Response will be sent as UNICAST to client IP (per RFC 6762)")
+		log.Printf("  -> UNICAST responses may be blocked by VM/client firewall - check firewall rules!")
+		log.Printf("  -> To see actual client IP and response destination, use: sudo tcpdump -i any port 5353")
+	} else {
+		log.Printf("  -> No records found for query: %s", q.Name)
+	}
+
+	return records
 }
